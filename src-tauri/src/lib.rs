@@ -1,17 +1,30 @@
 #![allow(deprecated)]
 
 mod clipboard;
+mod clipboard_db;
+mod clipboard_service;
+mod database;
 mod paste;
 mod shortcuts;
+mod tag_db;
 
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tauri::{Manager, PhysicalPosition, PhysicalSize, Position, Size, WebviewWindow, WindowEvent};
-use tauri_nspanel::builder::{CollectionBehavior, PanelLevel, StyleMask};
-use tauri_nspanel::{tauri_panel, WebviewWindowExt};
 use tokio::time::sleep;
 
+#[cfg(target_os = "macos")]
+use tauri_nspanel::builder::{CollectionBehavior, PanelLevel, StyleMask};
+#[cfg(target_os = "macos")]
+use tauri_nspanel::{tauri_panel, WebviewWindowExt};
+
+#[cfg(target_os = "windows")]
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+#[cfg(target_os = "windows")]
+use tauri::menu::{Menu, MenuItem};
+
+#[cfg(target_os = "macos")]
 tauri_panel! {
     panel!(ClipcatPanel {
         config: {
@@ -125,11 +138,32 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_nspanel::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .manage(app_state)
-        .invoke_handler(tauri::generate_handler![paste::paste_item])
+        .invoke_handler(tauri::generate_handler![
+            paste::paste_item,
+            paste::get_clipboard_history,
+            paste::get_pinned_items,
+            paste::search_clipboard,
+            paste::toggle_pin,
+            paste::delete_clipboard_item,
+            paste::get_settings,
+            paste::save_settings,
+            open_settings_window,
+            close_settings_window,
+        ])
         .setup(|app| {
+            #[cfg(target_os = "macos")]
+            app.handle().plugin(tauri_nspanel::init())?;
+
+            let app_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+            let db = database::Database::new(app_dir).map_err(|e| e.to_string())?;
+            let db_for_service = db.clone();
+            app.manage(std::sync::Arc::new(db));
+
+            let clipboard_service = clipboard_service::ClipboardService::new(db_for_service);
+            app.manage(std::sync::Arc::new(clipboard_service));
+
             let shortcut_manager = shortcuts::ShortcutManager::new(app.handle().clone());
             if let Err(e) = shortcut_manager.register_shortcuts() {
                 eprintln!("Failed to register shortcuts: {}", e);
@@ -179,67 +213,122 @@ pub fn run() {
                         .full_screen_auxiliary()
                         .into(),
                 );
-
-                let last_show_time = app.state::<AppState>().last_show_time.clone();
-                let target_x_clone = target_x;
-                let target_y_clone = target_y;
-
-                let window_clone = window.clone();
-                let window_visible = app.state::<AppState>().window_visible.clone();
-
-                window.on_window_event(move |event| {
-                    if let WindowEvent::Focused(false) = event {
-                        let now = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_millis() as u64;
-                        let show_time = last_show_time.load(Ordering::SeqCst);
-                        let time_since_show = now.saturating_sub(show_time);
-                        if window_visible.load(Ordering::SeqCst) && time_since_show > 100 {
-                            window_visible.store(false, Ordering::SeqCst);
-                            let win = window_clone.clone();
-                            let tx = target_x_clone;
-                            let ty = target_y_clone;
-                            tauri::async_runtime::spawn(async move {
-                                animate_window_fall(win, tx, ty).await;
-                            });
-                        }
-                    }
-                });
             }
 
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(target_os = "windows")]
             {
-                let window_clone = window.clone();
-                let target_x_clone = target_x;
-                let target_y_clone = target_y;
-                let window_visible = app.state::<AppState>().window_visible.clone();
-                let last_show_time = Arc::clone(&app.state::<AppState>().last_show_time);
+                window.set_always_on_top(true)?;
 
-                window.on_window_event(move |event| {
-                    if let WindowEvent::Focused(false) = event {
-                        let now = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_millis() as u64;
-                        let show_time = last_show_time.load(Ordering::SeqCst);
-                        let time_since_show = now.saturating_sub(show_time);
-                        if window_visible.load(Ordering::SeqCst) && time_since_show > 100 {
-                            window_visible.store(false, Ordering::SeqCst);
-                            let win = window_clone.clone();
-                            let tx = target_x_clone;
-                            let ty = target_y_clone;
-                            tauri::async_runtime::spawn(async move {
-                                animate_window_fall(win, tx, ty).await;
-                            });
+                let show_item = MenuItem::with_id(app, "show", "Show Clipcat", true, None::<&str>)?;
+                let quit_item = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+                let menu = Menu::with_items(app, &[&show_item, &quit_item])?;
+                let app_handle = app.handle().clone();
+
+                let _tray = TrayIconBuilder::new()
+                    .icon(app.default_window_icon().unwrap().clone())
+                    .menu(&menu)
+                    .menu_on_left_click(false)
+                    .on_menu_event(move |app, event| {
+                        match event.id.as_ref() {
+                            "show" => {
+                                if let Some(win) = app.get_webview_window("main") {
+                                    let _ = win.show();
+                                    let _ = win.set_focus();
+                                }
+                            }
+                            "quit" => {
+                                app.exit(0);
+                            }
+                            _ => {}
                         }
-                    }
-                });
+                    })
+                    .on_tray_icon_event(move |tray, event| {
+                        if let TrayIconEvent::Click {
+                            button: MouseButton::Left,
+                            button_state: MouseButtonState::Up,
+                            ..
+                        } = event
+                        {
+                            let app = tray.app_handle();
+                            if let Some(win) = app.get_webview_window("main") {
+                                if win.is_visible().unwrap_or(false) {
+                                    let _ = win.hide();
+                                } else {
+                                    let _ = win.show();
+                                    let _ = win.set_focus();
+                                }
+                            }
+                        }
+                    })
+                    .build(app_handle)?;
             }
+
+            let last_show_time = app.state::<AppState>().last_show_time.clone();
+            let target_x_clone = target_x;
+            let target_y_clone = target_y;
+            let window_clone = window.clone();
+            let window_visible = app.state::<AppState>().window_visible.clone();
+
+            window.on_window_event(move |event| {
+                if let WindowEvent::Focused(false) = event {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis() as u64;
+                    let show_time = last_show_time.load(Ordering::SeqCst);
+                    let time_since_show = now.saturating_sub(show_time);
+                    if window_visible.load(Ordering::SeqCst) && time_since_show > 100 {
+                        window_visible.store(false, Ordering::SeqCst);
+                        let win = window_clone.clone();
+                        let tx = target_x_clone;
+                        let ty = target_y_clone;
+                        tauri::async_runtime::spawn(async move {
+                            animate_window_fall(win, tx, ty).await;
+                        });
+                    }
+                }
+            });
 
             Ok(())
         })
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(on_run_event);
+}
+
+#[tauri::command]
+async fn open_settings_window(app: tauri::AppHandle) -> Result<(), String> {
+    if let Some(main_win) = app.get_webview_window("main") {
+        let _ = main_win.hide();
+    }
+
+    let title = {
+        let db = app.state::<std::sync::Arc<crate::database::Database>>();
+        let locale = db.get_setting("locale").map_err(|e| e.to_string())?.unwrap_or_else(|| "en".to_string());
+        if locale == "zh" { "首选项" } else { "Preferences" }
+    };
+
+    let settings_window = tauri::WebviewWindowBuilder::new(
+        &app,
+        "settings",
+        tauri::WebviewUrl::App("/settings".into()),
+    )
+    .title(title)
+    .inner_size(420.0, 500.0)
+    .resizable(false)
+    .center()
+    .build()
+    .map_err(|e| e.to_string())?;
+
+    let _ = settings_window.set_focus();
+
+    Ok(())
+}
+
+#[tauri::command]
+async fn close_settings_window(app: tauri::AppHandle) -> Result<(), String> {
+    if let Some(settings_win) = app.get_webview_window("settings") {
+        let _ = settings_win.close();
+    }
+    Ok(())
 }

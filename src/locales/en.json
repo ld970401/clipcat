@@ -1,0 +1,46 @@
+{
+  "app": {
+    "name": "Clipboard"
+  },
+  "search": {
+    "placeholder": "Search..."
+  },
+  "tags": {
+    "clipboard": "Clipboard",
+    "work": "Work",
+    "personal": "Personal",
+    "addTag": "Add Tag"
+  },
+  "card": {
+    "text": "Text",
+    "image": "Image",
+    "chars": "chars",
+    "size": "Size",
+    "new": "New",
+    "loading": "Loading...",
+    "justNow": "Just now",
+    "minutesAgo": "{n}m ago",
+    "hoursAgo": "{n}h ago",
+    "daysAgo": "{n}d ago"
+  },
+  "empty": {
+    "title": "No clipboard items yet",
+    "hint": "Copy something to get started",
+    "noResults": "No results found"
+  },
+  "settings": {
+    "title": "Settings",
+    "general": "General",
+    "shortcuts": "Shortcuts",
+    "update": "Update",
+    "about": "About",
+    "language": "Display Language",
+    "launchAtLogin": "Launch at Login",
+    "showPanel": "Show Panel",
+    "pinItem": "Pin Item",
+    "updatePlaceholder": "Coming soon",
+    "aboutPlaceholder": "Coming soon",
+    "cancel": "Cancel",
+    "save": "Save"
+  }
+}

@@ -1,14 +1,10 @@
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_clipboard_manager::ClipboardExt;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum ClipboardContent {
-    Text(String),
-    Image { width: u32, height: u32, rgba: Vec<u8> },
-}
+pub use crate::clipboard_db::ClipboardContent;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClipboardItem {
@@ -53,6 +49,7 @@ impl ClipboardManager {
         });
     }
 
+    #[allow(dead_code)]
     pub fn stop_listening(&self) {
         self.running.store(false, Ordering::SeqCst);
     }
@@ -82,6 +79,13 @@ impl ClipboardManager {
                 let result = app_handle.emit("clipboard-change", &item);
                 println!("Emit result: {:?}", result);
                 last_text_hash.store(hash, Ordering::SeqCst);
+
+                if let Some(service) = app_handle.try_state::<std::sync::Arc<crate::clipboard_service::ClipboardService>>() {
+                    let content = ClipboardContent::Text(text);
+                    if let Err(e) = service.on_clipboard_change(content) {
+                        eprintln!("Failed to save clipboard to DB: {}", e);
+                    }
+                }
             }
         } else {
             println!("Clipboard check - no text available");
@@ -114,6 +118,13 @@ impl ClipboardManager {
                 let result = app_handle.emit("clipboard-change", &item);
                 println!("Emit result: {:?}", result);
                 last_image_hash.store(hash, Ordering::SeqCst);
+
+                if let Some(service) = app_handle.try_state::<std::sync::Arc<crate::clipboard_service::ClipboardService>>() {
+                    let content = ClipboardContent::Image { width, height, rgba };
+                    if let Err(e) = service.on_clipboard_change(content) {
+                        eprintln!("Failed to save clipboard to DB: {}", e);
+                    }
+                }
             }
         }
     }

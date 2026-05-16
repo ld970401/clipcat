@@ -1,0 +1,46 @@
+{
+  "app": {
+    "name": "剪贴板"
+  },
+  "search": {
+    "placeholder": "搜索..."
+  },
+  "tags": {
+    "clipboard": "剪贴板",
+    "work": "工作",
+    "personal": "个人",
+    "addTag": "添加标签"
+  },
+  "card": {
+    "text": "文本",
+    "image": "图片",
+    "chars": "字符",
+    "size": "尺寸",
+    "new": "新",
+    "loading": "加载中...",
+    "justNow": "刚刚",
+    "minutesAgo": "{n}分钟前",
+    "hoursAgo": "{n}小时前",
+    "daysAgo": "{n}天前"
+  },
+  "empty": {
+    "title": "暂无剪贴板记录",
+    "hint": "复制内容以开始",
+    "noResults": "未找到结果"
+  },
+  "settings": {
+    "title": "设置",
+    "general": "常规",
+    "shortcuts": "快捷键",
+    "update": "更新",
+    "about": "关于",
+    "language": "显示语言",
+    "launchAtLogin": "开机启动",
+    "showPanel": "显示面板",
+    "pinItem": "置顶项目",
+    "updatePlaceholder": "即将推出",
+    "aboutPlaceholder": "即将推出",
+    "cancel": "取消",
+    "save": "保存"
+  }
+}
