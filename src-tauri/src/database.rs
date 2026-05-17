@@ -28,7 +28,11 @@ impl Database {
         std::fs::create_dir_all(&app_dir)?;
         let db_path = app_dir.join("clipcat.db");
 
-        let manager = SqliteConnectionManager::file(&db_path);
+        let manager = SqliteConnectionManager::file(&db_path)
+            .with_init(|conn| {
+                conn.execute_batch("PRAGMA foreign_keys = ON")?;
+                Ok(())
+            });
         let pool = Pool::builder().max_size(10).build(manager)?;
 
         let db = Self {
@@ -37,10 +41,6 @@ impl Database {
 
         db.init_schema()?;
         Ok(db)
-    }
-
-    pub fn pool(&self) -> Arc<DbPool> {
-        Arc::clone(&self.pool)
     }
 
     pub fn get_conn(&self) -> Result<DbConn, DbError> {
@@ -52,12 +52,12 @@ impl Database {
 
         conn.execute_batch(
             r#"
+            -- 创建表（如果不存在）
             -- 剪切板历史记录表
             CREATE TABLE IF NOT EXISTS clipboard (
                 id              INTEGER PRIMARY KEY AUTOINCREMENT,
                 content_type    TEXT NOT NULL CHECK (content_type IN ('text', 'image')),
                 content_text    TEXT,
-                content_image   BLOB,
                 width           INTEGER,
                 height          INTEGER,
                 is_pinned       INTEGER NOT NULL DEFAULT 0,
@@ -94,7 +94,16 @@ impl Database {
                 value TEXT NOT NULL
             );
 
-            -- 初始化默认设置
+            -- 图片表（存储缩略图）
+            CREATE TABLE IF NOT EXISTS clipboard_images (
+                id INTEGER PRIMARY KEY,
+                thumbnail BLOB NOT NULL,
+                original BLOB,
+                file_size INTEGER,
+                FOREIGN KEY (id) REFERENCES clipboard(id) ON DELETE CASCADE
+            );
+
+            -- 初始化默认设置（使用 INSERT OR IGNORE 避免覆盖已有值）
             INSERT OR IGNORE INTO settings (key, value) VALUES ('save_mode', 'duration');
             INSERT OR IGNORE INTO settings (key, value) VALUES ('retention_duration', '30');
             INSERT OR IGNORE INTO settings (key, value) VALUES ('retention_count', '500');
@@ -129,18 +138,6 @@ impl Database {
         Ok(())
     }
 
-    pub fn get_all_settings(&self) -> Result<std::collections::HashMap<String, String>, DbError> {
-        let conn = self.get_conn()?;
-        let mut stmt = conn.prepare("SELECT key, value FROM settings")?;
-        let mut rows = stmt.query([])?;
-        let mut settings = std::collections::HashMap::new();
-        while let Some(row) = rows.next()? {
-            let key: String = row.get(0)?;
-            let value: String = row.get(1)?;
-            settings.insert(key, value);
-        }
-        Ok(settings)
-    }
 }
 
 impl Clone for Database {

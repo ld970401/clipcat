@@ -1,5 +1,5 @@
+#[cfg(not(target_os = "macos"))]
 use enigo::{Direction, Enigo, Key, Keyboard, Settings};
-use std::process::{Command, Stdio};
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_clipboard_manager::ClipboardExt;
 
@@ -66,7 +66,6 @@ fn simulate_paste() -> Result<(), String> {
 fn write_to_clipboard(app: &AppHandle, item: &ClipboardItem) -> Result<(), String> {
     match &item.content {
         ClipboardContent::Text(text) => {
-            println!("Writing text to clipboard: {} chars", text.len());
             if text.is_empty() {
                 return Err("Text content is empty".to_string());
             }
@@ -74,8 +73,8 @@ fn write_to_clipboard(app: &AppHandle, item: &ClipboardItem) -> Result<(), Strin
                 .write_text(text)
                 .map_err(|e| format!("Failed to write text: {}", e))
         }
-        ClipboardContent::Image { width, height, rgba } => {
-            println!("Writing image to clipboard: {}x{}", width, height);
+        ClipboardContent::Image { width, height, thumbnail: _, original } => {
+            let rgba = original.as_ref().ok_or("Image content missing original data")?;
             if *width == 0 || *height == 0 {
                 eprintln!("Invalid image dimensions: {}x{}", width, height);
                 return Err(format!("Invalid image dimensions: {}x{}", width, height));
@@ -109,32 +108,86 @@ fn hide_panel(app: &AppHandle) {
 
     state.window_visible.store(false, std::sync::atomic::Ordering::SeqCst);
 
-    if let Err(e) = win.hide() {
-        eprintln!("hide_panel: failed to hide window: {}", e);
+    if let Ok(pos) = win.outer_position() {
+        let _ = win.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(
+            pos.x,
+            pos.y + super::RISE_OFFSET,
+        )));
+    }
+
+    let _ = win.hide();
+}
+
+#[tauri::command]
+pub async fn paste_item(app: AppHandle, id: i64, move_to_top: Option<bool>) -> Result<Option<crate::clipboard_db::ClipboardRecord>, String> {
+    let service = app.state::<std::sync::Arc<crate::clipboard_service::ClipboardService>>();
+
+    let record = if move_to_top.unwrap_or(false) {
+        let repo = &service.clipboard_repo;
+        let new_record = repo.duplicate_and_move_to_top(id).map_err(|e| e.to_string())?;
+        repo.delete(id).map_err(|e| e.to_string())?;
+        new_record
+    } else {
+        service.get_record(id)?.ok_or("Record not found")?
+    };
+
+    let item = ClipboardItem {
+        id: record.id,
+        content_type: record.content_type.clone(),
+        content: record.content.clone(),
+        tags: record.tags.clone(),
+        timestamp: record.created_at,
+    };
+
+    write_to_clipboard(&app, &item)?;
+
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        if let Err(e) = simulate_paste() {
+            eprintln!("Failed to simulate paste: {}", e);
+        }
+    });
+    hide_panel(&app);
+
+    if move_to_top.unwrap_or(false) {
+        let mut result = record;
+        if let crate::clipboard_db::ClipboardContent::Image { width, height, thumbnail, original: _ } = &result.content {
+            result.content = crate::clipboard_db::ClipboardContent::Image {
+                width: *width,
+                height: *height,
+                thumbnail: thumbnail.clone(),
+                original: None,
+            };
+        }
+        Ok(Some(result))
+    } else {
+        let mut result = record;
+        if let crate::clipboard_db::ClipboardContent::Image { width, height, thumbnail, original: _ } = &result.content {
+            result.content = crate::clipboard_db::ClipboardContent::Image {
+                width: *width,
+                height: *height,
+                thumbnail: thumbnail.clone(),
+                original: None,
+            };
+        }
+        Ok(Some(result))
     }
 }
 
 #[tauri::command]
-pub async fn paste_item(app: AppHandle, item: ClipboardItem) -> Result<(), String> {
-    println!("paste_item called: content_type={}", item.content_type);
+pub async fn copy_to_clipboard(app: AppHandle, id: i64) -> Result<(), String> {
+    let service = app.state::<std::sync::Arc<crate::clipboard_service::ClipboardService>>();
+    let record = service.get_record(id)?.ok_or("Record not found")?;
 
-    println!("Step 1: Writing to clipboard...");
+    let item = ClipboardItem {
+        id: record.id,
+        content_type: record.content_type.clone(),
+        content: record.content.clone(),
+        tags: record.tags.clone(),
+        timestamp: record.created_at,
+    };
+
     write_to_clipboard(&app, &item)?;
-    println!("Step 1: Done");
-
-    println!("Step 2: Hiding panel...");
-    hide_panel(&app);
-    println!("Step 2: Done");
-
-    println!("Step 3: Waiting 500ms for focus switch...");
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-    println!("Step 3: Done");
-
-    println!("Step 4: Simulating paste...");
-    simulate_paste()?;
-    println!("Step 4: Done");
-
-    println!("paste_item completed");
     Ok(())
 }
 
@@ -147,25 +200,6 @@ pub async fn get_clipboard_history(
 ) -> Result<Vec<crate::clipboard_db::ClipboardRecord>, String> {
     let service = app.state::<std::sync::Arc<crate::clipboard_service::ClipboardService>>();
     service.get_history(page, page_size, tag_id)
-}
-
-#[tauri::command]
-pub async fn get_pinned_items(
-    app: AppHandle,
-) -> Result<Vec<crate::clipboard_db::ClipboardRecord>, String> {
-    let service = app.state::<std::sync::Arc<crate::clipboard_service::ClipboardService>>();
-    service.get_pinned()
-}
-
-#[tauri::command]
-pub async fn search_clipboard(
-    app: AppHandle,
-    keyword: String,
-    page: u32,
-    page_size: Option<u32>,
-) -> Result<Vec<crate::clipboard_db::ClipboardRecord>, String> {
-    let service = app.state::<std::sync::Arc<crate::clipboard_service::ClipboardService>>();
-    service.search(&keyword, page, page_size)
 }
 
 #[tauri::command]
@@ -193,7 +227,7 @@ pub struct AppSettings {
     pub retention_count: i64,
     pub cleanup_time: String,
     pub shortcut_show: String,
-    pub shortcut_pin: String,
+    pub shortcut_hide: String,
     pub locale: String,
     pub launch_at_login: bool,
 }
@@ -205,8 +239,8 @@ pub async fn get_settings(app: AppHandle) -> Result<AppSettings, String> {
     let retention_duration = db.get_setting("retention_duration").map_err(|e| e.to_string())?.unwrap_or_else(|| "30".to_string()).parse().unwrap_or(30);
     let retention_count = db.get_setting("retention_count").map_err(|e| e.to_string())?.unwrap_or_else(|| "500".to_string()).parse().unwrap_or(500);
     let cleanup_time = db.get_setting("cleanup_time").map_err(|e| e.to_string())?.unwrap_or_else(|| "00:00".to_string());
-    let shortcut_show = db.get_setting("shortcut_show").map_err(|e| e.to_string())?.unwrap_or_else(|| "Cmd+Shift+V".to_string());
-    let shortcut_pin = db.get_setting("shortcut_pin").map_err(|e| e.to_string())?.unwrap_or_else(|| "Cmd+Shift+P".to_string());
+    let shortcut_show = db.get_setting("shortcut_show").map_err(|e| e.to_string())?.unwrap_or_else(|| "CmdOrCtrl+Shift+V".to_string());
+    let shortcut_hide = db.get_setting("shortcut_hide").map_err(|e| e.to_string())?.unwrap_or_else(|| "Escape".to_string());
     let locale = db.get_setting("locale").map_err(|e| e.to_string())?.unwrap_or_else(|| "en".to_string());
     let launch_at_login = db.get_setting("launch_at_login").map_err(|e| e.to_string())?.unwrap_or_else(|| "false".to_string()).parse().unwrap_or(false);
 
@@ -216,7 +250,7 @@ pub async fn get_settings(app: AppHandle) -> Result<AppSettings, String> {
         retention_count,
         cleanup_time,
         shortcut_show,
-        shortcut_pin,
+        shortcut_hide,
         locale,
         launch_at_login,
     })
@@ -230,11 +264,75 @@ pub async fn save_settings(app: AppHandle, settings: AppSettings) -> Result<(), 
     db.set_setting("retention_count", &settings.retention_count.to_string()).map_err(|e| e.to_string())?;
     db.set_setting("cleanup_time", &settings.cleanup_time).map_err(|e| e.to_string())?;
     db.set_setting("shortcut_show", &settings.shortcut_show).map_err(|e| e.to_string())?;
-    db.set_setting("shortcut_pin", &settings.shortcut_pin).map_err(|e| e.to_string())?;
+    db.set_setting("shortcut_hide", &settings.shortcut_hide).map_err(|e| e.to_string())?;
     db.set_setting("locale", &settings.locale).map_err(|e| e.to_string())?;
     db.set_setting("launch_at_login", &settings.launch_at_login.to_string()).map_err(|e| e.to_string())?;
+
+    {
+        use tauri_plugin_autostart::ManagerExt;
+        let autostart_manager = app.autolaunch();
+        if settings.launch_at_login {
+            let _ = autostart_manager.enable();
+        } else {
+            let _ = autostart_manager.disable();
+        }
+    }
+
+    {
+        let shortcut_manager = crate::shortcuts::ShortcutManager::new(app.clone());
+        if let Err(e) = shortcut_manager.reregister_shortcuts(&settings.shortcut_show, &settings.shortcut_hide) {
+            eprintln!("Failed to re-register shortcuts: {}", e);
+        }
+    }
 
     app.emit("settings-changed", &settings).map_err(|e| e.to_string())?;
 
     Ok(())
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct TagData {
+    pub id: i64,
+    pub name: String,
+    pub color: String,
+}
+
+#[tauri::command]
+pub async fn create_tag(app: AppHandle, name: String, color: Option<String>) -> Result<TagData, String> {
+    let service = app.state::<std::sync::Arc<crate::clipboard_service::ClipboardService>>();
+    let tag = service.create_tag(name, color)?;
+    Ok(TagData {
+        id: tag.id,
+        name: tag.name,
+        color: tag.color,
+    })
+}
+
+#[tauri::command]
+pub async fn update_tag(app: AppHandle, id: i64, name: String, color: String) -> Result<(), String> {
+    let service = app.state::<std::sync::Arc<crate::clipboard_service::ClipboardService>>();
+    service.update_tag(id, name, color)
+}
+
+#[tauri::command]
+pub async fn delete_tag(app: AppHandle, id: i64) -> Result<(), String> {
+    let service = app.state::<std::sync::Arc<crate::clipboard_service::ClipboardService>>();
+    service.delete_tag(id)
+}
+
+#[tauri::command]
+pub async fn get_all_tags(app: AppHandle) -> Result<Vec<TagData>, String> {
+    let service = app.state::<std::sync::Arc<crate::clipboard_service::ClipboardService>>();
+    let tags = service.list_tags()?;
+    Ok(tags.into_iter().map(|t| TagData {
+        id: t.id,
+        name: t.name,
+        color: t.color,
+    }).collect())
+}
+
+#[tauri::command]
+pub async fn update_record_tags(app: AppHandle, id: i64, tag_ids: Vec<i64>) -> Result<(), String> {
+    let service = app.state::<std::sync::Arc<crate::clipboard_service::ClipboardService>>();
+    service.update_record_tags(id, tag_ids)
 }

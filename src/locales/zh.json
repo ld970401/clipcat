@@ -36,11 +36,33 @@
     "about": "关于",
     "language": "显示语言",
     "launchAtLogin": "开机启动",
+    "dataRetention": "数据保留",
+    "saveMode": "保留方式",
+    "byDuration": "按时间",
+    "byCount": "按数量",
+    "retentionDuration": "保留时长",
+    "retentionCount": "保留数量",
+    "days": "天",
+    "items": "条",
+    "cleanupTime": "清理时间",
     "showPanel": "显示面板",
+    "hidePanel": "隐藏面板",
     "pinItem": "置顶项目",
+    "recording": "请按下快捷键...",
+    "shortcutHint": "点击快捷键按钮，然后按下你想要的组合键。快捷键必须包含至少一个修饰键（Cmd/Ctrl/Alt/Shift）。",
     "updatePlaceholder": "即将推出",
     "aboutPlaceholder": "即将推出",
     "cancel": "取消",
     "save": "保存"
+  },
+  "contextMenu": {
+    "copy": "复制",
+    "tags": "标签",
+    "delete": "删除"
+  },
+  "tagMenu": {
+    "rename": "重命名",
+    "color": "颜色",
+    "delete": "删除"
   }
 }

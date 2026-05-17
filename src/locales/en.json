@@ -36,11 +36,33 @@
     "about": "About",
     "language": "Display Language",
     "launchAtLogin": "Launch at Login",
+    "dataRetention": "Data Retention",
+    "saveMode": "Save Mode",
+    "byDuration": "By Duration",
+    "byCount": "By Count",
+    "retentionDuration": "Keep Duration",
+    "retentionCount": "Keep Count",
+    "days": "days",
+    "items": "items",
+    "cleanupTime": "Cleanup Time",
     "showPanel": "Show Panel",
+    "hidePanel": "Hide Panel",
     "pinItem": "Pin Item",
+    "recording": "Press shortcut...",
+    "shortcutHint": "Click the shortcut button, then press your desired key combination. Shortcuts must include at least one modifier (Cmd/Ctrl/Alt/Shift).",
     "updatePlaceholder": "Coming soon",
     "aboutPlaceholder": "Coming soon",
     "cancel": "Cancel",
     "save": "Save"
+  },
+  "contextMenu": {
+    "copy": "Copy",
+    "tags": "Tags",
+    "delete": "Delete"
+  },
+  "tagMenu": {
+    "rename": "Rename",
+    "color": "Color",
+    "delete": "Delete"
   }
 }

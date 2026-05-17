@@ -4,6 +4,7 @@ mod clipboard;
 mod clipboard_db;
 mod clipboard_service;
 mod database;
+mod image_processor;
 mod paste;
 mod shortcuts;
 mod tag_db;
@@ -11,7 +12,7 @@ mod tag_db;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tauri::{Manager, PhysicalPosition, PhysicalSize, Position, Size, WebviewWindow, WindowEvent};
+use tauri::{Emitter, Manager, PhysicalPosition, PhysicalSize, Position, Size, WebviewWindow, WindowEvent};
 use tokio::time::sleep;
 
 #[cfg(target_os = "macos")]
@@ -38,7 +39,7 @@ tauri_panel! {
 const ANIMATION_STEPS: u32 = 20;
 const ANIMATION_STEP_DURATION_MS: u64 = 10;
 const WINDOW_HEIGHT_RATIO: f64 = 0.40;
-const RISE_OFFSET: i32 = 800;
+pub const RISE_OFFSET: i32 = 800;
 const DOCK_HEIGHT: i32 = 0;
 
 struct AppState {
@@ -110,6 +111,7 @@ fn on_run_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
                 state.last_show_time.store(now, Ordering::SeqCst);
                 if let Some(win) = app.get_webview_window("main") {
                     let _ = win.show();
+                    let _ = app.emit("window-showing", ());
                     let target_x = state.target_x.load(Ordering::SeqCst);
                     let target_y = state.target_y.load(Ordering::SeqCst);
                     let window_height = state.window_height.load(Ordering::SeqCst);
@@ -142,19 +144,28 @@ pub fn run() {
         .manage(app_state)
         .invoke_handler(tauri::generate_handler![
             paste::paste_item,
+            paste::copy_to_clipboard,
             paste::get_clipboard_history,
-            paste::get_pinned_items,
-            paste::search_clipboard,
             paste::toggle_pin,
             paste::delete_clipboard_item,
             paste::get_settings,
             paste::save_settings,
+            paste::create_tag,
+            paste::update_tag,
+            paste::delete_tag,
+            paste::get_all_tags,
+            paste::update_record_tags,
             open_settings_window,
             close_settings_window,
         ])
         .setup(|app| {
             #[cfg(target_os = "macos")]
             app.handle().plugin(tauri_nspanel::init())?;
+
+            app.handle().plugin(tauri_plugin_autostart::init(
+                tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+                None,
+            ))?;
 
             let app_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
             let db = database::Database::new(app_dir).map_err(|e| e.to_string())?;
@@ -171,6 +182,50 @@ pub fn run() {
 
             let clipboard_manager = clipboard::ClipboardManager::new(app.handle().clone());
             clipboard_manager.start_listening();
+
+            {
+                let app_handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    let mut last_cleanup_date: Option<chrono::NaiveDate> = None;
+                    loop {
+                        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                        let db = app_handle.state::<std::sync::Arc<crate::database::Database>>();
+                        let cleanup_time_str = db.get_setting("cleanup_time").unwrap_or(None).unwrap_or_else(|| "00:00".to_string());
+                        let now = chrono::Local::now();
+                        let today = now.date_naive();
+
+                        let should_run = match last_cleanup_date {
+                            Some(d) if d == today => false,
+                            _ => true,
+                        };
+
+                        if should_run {
+                            let cleanup_time = parse_cleanup_time(&cleanup_time_str);
+                            if let Some(ct) = cleanup_time {
+                                let target = today.and_hms_opt(ct.0, ct.1, 0).unwrap_or_else(|| today.and_hms_opt(0, 0, 0).unwrap());
+                                let now_naive = now.time();
+                                let target_time = target.time();
+                                if now_naive >= target_time {
+                                    let service = app_handle.state::<std::sync::Arc<crate::clipboard_service::ClipboardService>>();
+                                    let save_mode = db.get_setting("save_mode").unwrap_or(None).unwrap_or_else(|| "duration".to_string());
+                                    if save_mode == "duration" {
+                                        let days: u64 = db.get_setting("retention_duration").unwrap_or(None).unwrap_or_else(|| "30".to_string()).parse().unwrap_or(30);
+                                        if let Err(e) = service.cleanup_old_records(0, days) {
+                                            eprintln!("Cleanup task failed: {}", e);
+                                        }
+                                    } else if save_mode == "count" {
+                                        let count: u32 = db.get_setting("retention_count").unwrap_or(None).unwrap_or_else(|| "500".to_string()).parse().unwrap_or(500);
+                                        if let Err(e) = service.cleanup_excess_count(count) {
+                                            eprintln!("Cleanup task failed: {}", e);
+                                        }
+                                    }
+                                    last_cleanup_date = Some(today);
+                                }
+                            }
+                        }
+                    }
+                });
+            }
 
             let window = app.get_webview_window("main").ok_or("Failed to get main window")?;
 
@@ -279,6 +334,7 @@ pub fn run() {
                     let time_since_show = now.saturating_sub(show_time);
                     if window_visible.load(Ordering::SeqCst) && time_since_show > 100 {
                         window_visible.store(false, Ordering::SeqCst);
+                        let _ = window_clone.app_handle().emit("window-hiding", ());
                         let win = window_clone.clone();
                         let tx = target_x_clone;
                         let ty = target_y_clone;
@@ -331,4 +387,18 @@ async fn close_settings_window(app: tauri::AppHandle) -> Result<(), String> {
         let _ = settings_win.close();
     }
     Ok(())
+}
+
+fn parse_cleanup_time(s: &str) -> Option<(u32, u32)> {
+    let parts: Vec<&str> = s.split(':').collect();
+    if parts.len() != 2 {
+        return None;
+    }
+    let hour: u32 = parts[0].parse().ok()?;
+    let minute: u32 = parts[1].parse().ok()?;
+    if hour < 24 && minute < 60 {
+        Some((hour, minute))
+    } else {
+        None
+    }
 }

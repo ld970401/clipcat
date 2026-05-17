@@ -1,4 +1,5 @@
 <script setup>
+import { onMounted, onUnmounted, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 
 const { t } = useI18n();
@@ -16,14 +17,37 @@ const props = defineProps({
     type: Boolean,
     default: false,
   },
+  tags: {
+    type: Array,
+    default: () => [],
+  },
+  menuId: {
+    type: [String, Number],
+    default: null,
+  },
+  activeMenuId: {
+    type: [String, Number],
+    default: null,
+  },
 });
 
-const emit = defineEmits(["click", "dblclick"]);
+const emit = defineEmits(["click", "dblclick", "copy", "toggle-pin", "delete", "update-tags", "update-active-menu"]);
 
 const typeColors = {
   text: { header: "#4a90d9", icon: "#ffffff" },
   image: { header: "#50c878", icon: "#ffffff" },
 };
+
+const showContextMenu = ref(false);
+const contextMenuX = ref(0);
+const contextMenuY = ref(0);
+
+watch(() => props.activeMenuId, (newId) => {
+  if (newId !== props.menuId) {
+    showContextMenu.value = false;
+  }
+});
+const showPinSubmenu = ref(false);
 
 function getTextContent(item) {
   if (!item.content) return "";
@@ -67,6 +91,87 @@ function handleClick() {
 function handleDblClick() {
   emit("dblclick", props.item);
 }
+
+function handleContextMenu(event) {
+  event.preventDefault();
+  event.stopPropagation();
+  showContextMenu.value = true;
+  showPinSubmenu.value = false;
+  contextMenuX.value = event.clientX;
+  contextMenuY.value = event.clientY;
+  emit("update-active-menu", props.menuId);
+}
+
+function handleClickOutside(event) {
+  const menu = document.querySelector('.context-menu');
+  if (menu && !menu.contains(event.target)) {
+    showContextMenu.value = false;
+    showPinSubmenu.value = false;
+    emit("update-active-menu", null);
+  }
+}
+
+function handleCopy() {
+  showContextMenu.value = false;
+  emit("copy", props.item);
+}
+
+function handleTogglePin() {
+  showContextMenu.value = false;
+  emit("toggle-pin", props.item.id);
+}
+
+function handleDelete() {
+  showContextMenu.value = false;
+  emit("delete", props.item.id);
+}
+
+function handlePinSubmenuEnter() {
+  showPinSubmenu.value = true;
+}
+
+function handlePinSubmenuLeave() {
+  showPinSubmenu.value = false;
+}
+
+function handleSelectTag(tagId) {
+  showContextMenu.value = false;
+  showPinSubmenu.value = false;
+  const currentTagIds = props.item.tags.map((t) => t.id);
+  let newTagIds;
+  if (currentTagIds.includes(tagId)) {
+    newTagIds = currentTagIds.filter((id) => id !== tagId);
+  } else {
+    newTagIds = [...currentTagIds, tagId];
+  }
+  emit("update-tags", { id: props.item.id, tagIds: newTagIds });
+}
+
+function hasTag(tagId) {
+  return props.item.tags.some((t) => t.id === tagId);
+}
+
+function getCustomTags() {
+  return props.tags.filter((tag) => tag.id !== 1);
+}
+
+
+function closeContextMenu() {
+  showContextMenu.value = false;
+  showPinSubmenu.value = false;
+}
+
+onMounted(() => {
+  document.addEventListener("click", handleClickOutside);
+});
+
+onUnmounted(() => {
+  document.removeEventListener("click", handleClickOutside);
+});
+
+defineExpose({
+  closeContextMenu,
+});
 </script>
 
 <template>
@@ -75,6 +180,7 @@ function handleDblClick() {
     :class="{ 'is-new': item.isNew, 'is-selected': isSelected }"
     @click="handleClick"
     @dblclick="handleDblClick"
+    @contextmenu.prevent="handleContextMenu"
   >
     <div class="card-header" :style="{ backgroundColor: typeColors[item.content_type]?.header || '#4a90d9' }">
       <div class="header-left">
@@ -101,6 +207,7 @@ function handleDblClick() {
             :src="imageUrl"
             alt="Clipboard image"
             class="preview-image"
+            draggable="false"
           />
           <div v-else class="image-loading">{{ t('card.loading') }}</div>
         </div>
@@ -114,13 +221,52 @@ function handleDblClick() {
         <span class="footer-info">{{ t('card.size') }}: {{ getImageDimensions(item) }}</span>
       </template>
     </div>
+
+    <Teleport to="body">
+      <div
+        v-if="showContextMenu"
+        class="context-menu"
+        :style="{ left: contextMenuX + 'px', top: contextMenuY + 'px' }"
+      >
+        <div class="menu-item" @click.stop="handleCopy">
+          <span>{{ t("contextMenu.copy") }}</span>
+        </div>
+        <template v-if="getCustomTags().length > 0">
+          <div
+            class="menu-item has-submenu"
+            @mouseenter="handlePinSubmenuEnter"
+            @mouseleave="handlePinSubmenuLeave"
+          >
+            <span>{{ t("contextMenu.tags") }}</span>
+            <span class="submenu-arrow"><svg viewBox="0 0 1024 1024" version="1.1" xmlns="http://www.w3.org/2000/svg" width="16" height="16"><path d="M318.57 223.95l322.99 322.99c21.87 21.87 57.33 21.87 79.2 0 21.87-21.87 21.87-57.33 0-79.2l-323-322.99c-21.87-21.87-57.33-21.87-79.2 0-21.86 21.87-21.86 57.33 0.01 79.2z" fill="currentColor"></path><path d="M729.75 555.95L406.76 878.93c-21.87 21.87-57.33 21.87-79.2 0-21.87-21.87-21.87-57.33 0-79.2l322.99-322.99c21.87-21.87 57.33-21.87 79.2 0 21.87 21.88 21.87 57.34 0 79.21z" fill="currentColor"></path></svg></span>
+            <div v-if="showPinSubmenu" class="submenu">
+              <div
+                v-for="tag in getCustomTags()"
+                :key="tag.id"
+                class="menu-item"
+                :class="{ active: hasTag(tag.id) }"
+                @click.stop="handleSelectTag(tag.id)"
+              >
+                <span class="tag-dot" :style="{ backgroundColor: tag.color }"></span>
+                <span>{{ tag.name }}</span>
+                <span v-if="hasTag(tag.id)" class="check-mark">✓</span>
+              </div>
+            </div>
+          </div>
+          <div class="menu-divider"></div>
+        </template>
+        <div class="menu-item danger" @click.stop="handleDelete">
+          <span>{{ t("contextMenu.delete") }}</span>
+        </div>
+      </div>
+    </Teleport>
   </div>
 </template>
 
 <style scoped>
 .card {
   flex: 0 0 calc(100vh - 96px);
-  height: calc(100vh - 96px);
+  height: calc(100vh - 84px);
   background: #ffffff;
   border-radius: 12px;
   overflow: hidden;
@@ -198,67 +344,139 @@ function handleDblClick() {
 }
 
 .app-icon {
-  width: 20px;
-  height: 20px;
-  opacity: 0.9;
+  width: 18px;
+  height: 18px;
 }
 
 .card-body {
   flex: 1;
-  padding: 12px;
   overflow: hidden;
   display: flex;
-  align-items: center;
-  justify-content: center;
+  flex-direction: column;
 }
 
 .text-preview {
-  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
-  font-size: 13px;
+  padding: 14px;
+  font-size: 14px;
   line-height: 1.5;
-  color: #1d1d1f;
-  white-space: pre-wrap;
-  word-break: break-word;
+  color: #333;
   overflow: hidden;
-  display: -webkit-box;
-  -webkit-line-clamp: 12;
-  line-clamp: 12;
-  -webkit-box-orient: vertical;
-  width: 100%;
+  word-break: break-word;
+  white-space: pre-wrap;
 }
 
 .image-preview {
-  width: 100%;
-  height: 100%;
+  flex: 1;
   display: flex;
   align-items: center;
   justify-content: center;
-  background: #f5f5f7;
-  border-radius: 8px;
+  background: #f5f5f5;
+  padding: 14px;
 }
 
 .preview-image {
   max-width: 100%;
   max-height: 100%;
   object-fit: contain;
-  border-radius: 4px;
+  border-radius: 8px;
+  user-select: none;
   -webkit-user-drag: none;
-  pointer-events: none;
 }
 
 .image-loading {
-  font-size: 12px;
-  color: #86868b;
+  color: #999;
+  font-size: 14px;
 }
 
 .card-footer {
   padding: 10px 14px;
-  border-top: 1px solid #f0f0f0;
   background: #fafafa;
+  border-top: 1px solid #eee;
 }
 
 .footer-info {
   font-size: 11px;
-  color: #86868b;
+  color: #999;
+}
+
+.context-menu {
+  position: fixed;
+  background: #ffffff;
+  border-radius: 10px;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.15);
+  min-width: 160px;
+  padding: 6px;
+  z-index: 10000;
+}
+
+.menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 32px;
+  padding: 0 14px;
+  cursor: pointer;
+  font-size: 15px;
+  color: #1d1d1f;
+  position: relative;
+  border-radius: 6px;
+}
+
+.menu-item:hover {
+  background: #f2f2f2;
+}
+
+.menu-item.danger {
+  color: #ff3b30;
+}
+
+.menu-item.danger:hover {
+  background: #fff0f0;
+}
+
+.submenu-arrow {
+  margin-top: 5px;
+  margin-left: auto;
+  font-size: 12px;
+  color: #999;
+}
+
+.menu-divider {
+  height: 1px;
+  background: #e5e5e5;
+  margin: 4px 8px;
+}
+
+.has-submenu {
+  position: relative;
+}
+
+.submenu {
+  position: absolute;
+  left: 100%;
+  top: 0;
+  background: #ffffff;
+  border-radius: 10px;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.15);
+  min-width: 140px;
+  padding: 6px;
+  margin-left: 4px;
+}
+
+.submenu .menu-item.active {
+  background: #f2f2f2;
+}
+
+.tag-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.check-mark {
+  margin-left: auto;
+  color: #007aff;
+  font-weight: bold;
 }
 </style>

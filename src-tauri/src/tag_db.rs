@@ -147,4 +147,29 @@ impl TagRepository {
         let color_index = (count as usize) % colors.len();
         Ok(colors[color_index].to_string())
     }
+
+    pub fn ensure_default_tag_exists(&self, name: &str, color: &str) -> Result<Tag, DbError> {
+        let conn = self.db.get_conn()?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
+
+        if let Some(tag) = self.get_by_id(1)? {
+            return Ok(tag);
+        }
+
+        conn.execute(
+            "INSERT INTO tag (id, name, color, created_at, updated_at) VALUES (1, ?1, ?2, ?3, ?3)",
+            params![name, color, now],
+        )?;
+
+        Ok(Tag {
+            id: 1,
+            name: name.to_string(),
+            color: color.to_string(),
+            created_at: now as u64,
+            updated_at: now as u64,
+        })
+    }
 }

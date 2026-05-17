@@ -4,15 +4,19 @@ use crate::tag_db::{CreateTagRequest, Tag, TagRepository};
 use std::sync::Arc;
 
 pub struct ClipboardService {
-    clipboard_repo: Arc<ClipboardRepository>,
+    pub clipboard_repo: Arc<ClipboardRepository>,
     tag_repo: Arc<TagRepository>,
 }
 
 impl ClipboardService {
     pub fn new(db: Database) -> Self {
+        let tag_repo = TagRepository::new(db.clone());
+        if let Err(e) = tag_repo.ensure_default_tag_exists("Clipboard", "#6B7280") {
+            eprintln!("Failed to ensure default tag exists: {}", e);
+        }
         Self {
             clipboard_repo: Arc::new(ClipboardRepository::new(db.clone())),
-            tag_repo: Arc::new(TagRepository::new(db)),
+            tag_repo: Arc::new(tag_repo),
         }
     }
 
@@ -21,9 +25,12 @@ impl ClipboardService {
             ClipboardContent::Text(text) => {
                 (ClipboardRepository::hash_string(text), "text")
             }
-            ClipboardContent::Image { rgba, .. } => {
+            ClipboardContent::Image { original: Some(rgba), .. } => {
                 let hash = ClipboardRepository::hash_bytes(rgba);
                 (hash, "image")
+            }
+            ClipboardContent::Image { original: None, .. } => {
+                return Err("Image content missing original data".to_string());
             }
         };
 
@@ -44,6 +51,14 @@ impl ClipboardService {
 
         let record = self.clipboard_repo.create(&req).map_err(|e| e.to_string())?;
 
+        if let Err(e) = self.clipboard_repo.add_tag_to_record(record.id, 1) {
+            eprintln!("Failed to add default tag to record: {}", e);
+        }
+
+        if let Ok(Some(record_with_tags)) = self.clipboard_repo.get_by_id(record.id) {
+            return Ok(Some(record_with_tags));
+        }
+
         Ok(Some(record))
     }
 
@@ -56,17 +71,6 @@ impl ClipboardService {
         let page_size = page_size.unwrap_or(30);
         self.clipboard_repo
             .list(page, page_size, tag_id)
-            .map_err(|e| e.to_string())
-    }
-
-    pub fn get_pinned(&self) -> Result<Vec<ClipboardRecord>, String> {
-        self.clipboard_repo.list_pinned().map_err(|e| e.to_string())
-    }
-
-    pub fn search(&self, keyword: &str, page: u32, page_size: Option<u32>) -> Result<Vec<ClipboardRecord>, String> {
-        let page_size = page_size.unwrap_or(30);
-        self.clipboard_repo
-            .search(keyword, page, page_size)
             .map_err(|e| e.to_string())
     }
 
@@ -116,6 +120,11 @@ impl ClipboardService {
         self.tag_repo.delete(id).map_err(|e| e.to_string())
     }
 
+    pub fn update_tag(&self, id: i64, name: String, color: String) -> Result<(), String> {
+        let req = crate::tag_db::UpdateTagRequest { name, color };
+        self.tag_repo.update(id, &req).map_err(|e| e.to_string())
+    }
+
     pub fn cleanup_old_records(&self, _max_count: u32, keep_days: u64) -> Result<u32, String> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -132,11 +141,13 @@ impl ClipboardService {
         Ok(deleted)
     }
 
-    pub fn clipboard_repo(&self) -> Arc<ClipboardRepository> {
-        Arc::clone(&self.clipboard_repo)
+    pub fn cleanup_excess_count(&self, max_count: u32) -> Result<u32, String> {
+        let deleted = self
+            .clipboard_repo
+            .delete_excess_count(max_count, true)
+            .map_err(|e| e.to_string())?;
+
+        Ok(deleted)
     }
 
-    pub fn tag_repo(&self) -> Arc<TagRepository> {
-        Arc::clone(&self.tag_repo)
-    }
 }

@@ -5,11 +5,14 @@ use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_clipboard_manager::ClipboardExt;
 
 pub use crate::clipboard_db::ClipboardContent;
+pub use crate::tag_db::Tag;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClipboardItem {
+    pub id: i64,
     pub content_type: String,
     pub content: ClipboardContent,
+    pub tags: Vec<Tag>,
     pub timestamp: u64,
 }
 
@@ -62,33 +65,34 @@ impl ClipboardManager {
         if let Ok(text) = app_handle.clipboard().read_text() {
             let hash = Self::hash_string(&text);
             let last = last_text_hash.load(Ordering::SeqCst);
-            println!("Clipboard check - text: len={}, hash={}, last={}", text.len(), hash, last);
             if hash != last {
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis() as u64;
-
-                let item = ClipboardItem {
-                    content_type: "text".to_string(),
-                    content: ClipboardContent::Text(text.clone()),
-                    timestamp: now,
-                };
-
-                println!("Emitting TEXT clipboard event: len={}", text.len());
-                let result = app_handle.emit("clipboard-change", &item);
-                println!("Emit result: {:?}", result);
-                last_text_hash.store(hash, Ordering::SeqCst);
-
                 if let Some(service) = app_handle.try_state::<std::sync::Arc<crate::clipboard_service::ClipboardService>>() {
                     let content = ClipboardContent::Text(text);
-                    if let Err(e) = service.on_clipboard_change(content) {
-                        eprintln!("Failed to save clipboard to DB: {}", e);
+                    match service.on_clipboard_change(content) {
+                        Ok(Some(record)) => {
+                            last_text_hash.store(hash, Ordering::SeqCst);
+                            last_image_hash.store(0, Ordering::SeqCst);
+                            let item = ClipboardItem {
+                                id: record.id,
+                                content_type: record.content_type.clone(),
+                                content: record.content,
+                                tags: record.tags,
+                                timestamp: record.created_at,
+                            };
+                            if let Err(e) = app_handle.emit("clipboard-change", &item) {
+                                eprintln!("Failed to emit clipboard event: {}", e);
+                            }
+                        }
+                        Ok(None) => {
+                            last_text_hash.store(hash, Ordering::SeqCst);
+                        }
+                        Err(e) => {
+                            eprintln!("Failed to save clipboard to DB: {}", e);
+                        }
                     }
                 }
             }
-        } else {
-            println!("Clipboard check - no text available");
+            return;
         }
 
         if let Ok(image) = app_handle.clipboard().read_image() {
@@ -97,32 +101,40 @@ impl ClipboardManager {
             let height = image.height();
             let hash = Self::hash_bytes(&rgba);
             let last = last_image_hash.load(Ordering::SeqCst);
-            println!("Clipboard check - image: {}x{}, hash={}, last={}", width, height, hash, last);
             if hash != last {
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis() as u64;
-
-                let item = ClipboardItem {
-                    content_type: "image".to_string(),
-                    content: ClipboardContent::Image {
-                        width,
-                        height,
-                        rgba: rgba.clone(),
-                    },
-                    timestamp: now,
-                };
-
-                println!("Emitting IMAGE clipboard event: {}x{}", width, height);
-                let result = app_handle.emit("clipboard-change", &item);
-                println!("Emit result: {:?}", result);
-                last_image_hash.store(hash, Ordering::SeqCst);
-
                 if let Some(service) = app_handle.try_state::<std::sync::Arc<crate::clipboard_service::ClipboardService>>() {
-                    let content = ClipboardContent::Image { width, height, rgba };
-                    if let Err(e) = service.on_clipboard_change(content) {
-                        eprintln!("Failed to save clipboard to DB: {}", e);
+                    let content = ClipboardContent::Image { width, height, thumbnail: None, original: Some(rgba) };
+                    match service.on_clipboard_change(content) {
+                        Ok(Some(record)) => {
+                            last_image_hash.store(hash, Ordering::SeqCst);
+                            let emit_content = match &record.content {
+                                ClipboardContent::Image { width, height, thumbnail, original: _ } => {
+                                    ClipboardContent::Image {
+                                        width: *width,
+                                        height: *height,
+                                        thumbnail: thumbnail.clone(),
+                                        original: None,
+                                    }
+                                }
+                                other => other.clone(),
+                            };
+                            let item = ClipboardItem {
+                                id: record.id,
+                                content_type: record.content_type.clone(),
+                                content: emit_content,
+                                tags: record.tags,
+                                timestamp: record.created_at,
+                            };
+                            if let Err(e) = app_handle.emit("clipboard-change", &item) {
+                                eprintln!("Failed to emit clipboard event: {}", e);
+                            }
+                        }
+                        Ok(None) => {
+                            last_image_hash.store(hash, Ordering::SeqCst);
+                        }
+                        Err(e) => {
+                            eprintln!("Failed to save clipboard to DB: {}", e);
+                        }
                     }
                 }
             }
@@ -130,18 +142,10 @@ impl ClipboardManager {
     }
 
     fn hash_string(s: &str) -> u64 {
-        let mut hash: u64 = 0;
-        for (i, byte) in s.bytes().enumerate() {
-            hash = hash.wrapping_add((byte as u64).wrapping_mul(i as u64 + 1));
-        }
-        hash
+        xxhash_rust::xxh3::xxh3_64(s.as_bytes())
     }
 
     fn hash_bytes(bytes: &[u8]) -> u64 {
-        let mut hash: u64 = 0;
-        for (i, &byte) in bytes.iter().enumerate() {
-            hash = hash.wrapping_add((byte as u64).wrapping_mul(i as u64 + 1));
-        }
-        hash
+        xxhash_rust::xxh3::xxh3_64(bytes)
     }
 }

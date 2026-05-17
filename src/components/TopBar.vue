@@ -1,5 +1,5 @@
 <script setup>
-import { nextTick, ref } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, ref } from "vue";
 import { useI18n } from "vue-i18n";
 
 const { t } = useI18n();
@@ -15,7 +15,15 @@ const props = defineProps({
   },
 });
 
-const emit = defineEmits(["openSettings", "selectTag", "addTag"]);
+const emit = defineEmits(["openSettings", "selectTag", "addTag", "search", "deleteTag", "updateTag", "menu-open", "menu-close"]);
+
+const sortedTags = computed(() => {
+  return [...props.tags].sort((a, b) => {
+    if (a.id === 1) return -1;
+    if (b.id === 1) return 1;
+    return 0;
+  });
+});
 
 const searchQuery = ref("");
 const isSearchFocused = ref(false);
@@ -23,6 +31,24 @@ const searchInput = ref(null);
 const showAddTag = ref(false);
 const newTagName = ref("");
 const newTagInput = ref(null);
+
+const showTagMenu = ref(false);
+const tagMenuX = ref(0);
+const tagMenuY = ref(0);
+const activeTagMenuId = ref(null);
+const renameValue = ref("");
+const renamingTagId = ref(null);
+
+const tagColors = [
+  "#ff3b30",
+  "#ff9500",
+  "#ffcc00",
+  "#34c759",
+  "#007aff",
+  "#af52de",
+  "#ff2d55",
+  "#8e8e93",
+];
 
 function focusSearch() {
   isSearchFocused.value = true;
@@ -66,12 +92,98 @@ function cancelAddTag() {
   showAddTag.value = false;
 }
 
+function handleAddTagInputBlur(event) {
+  if (!event.relatedTarget || !event.relatedTarget.closest('.add-tag-btn')) {
+    finishAddTag();
+  }
+}
+
 function openSettings() {
   emit("openSettings");
 }
 
+function handleTagContextMenu(event, tag) {
+  if (tag.id === 1) return;
+  event.preventDefault();
+  event.stopPropagation();
+  showTagMenu.value = true;
+  const rect = event.currentTarget.getBoundingClientRect();
+  tagMenuX.value = rect.left;
+  tagMenuY.value = rect.bottom + 4;
+  activeTagMenuId.value = tag.id;
+  emit("menu-open");
+}
+
+function closeTagMenu() {
+  showTagMenu.value = false;
+  activeTagMenuId.value = null;
+  renamingTagId.value = null;
+  renameValue.value = "";
+  emit("menu-close");
+}
+
+function handleClickOutside(event) {
+  const menu = document.querySelector('.tag-context-menu');
+  if (menu && !menu.contains(event.target)) {
+    closeTagMenu();
+  }
+}
+
+function startRename() {
+  const tag = props.tags.find((t) => t.id === activeTagMenuId.value);
+  if (tag) {
+    renamingTagId.value = tag.id;
+    renameValue.value = tag.name;
+    showTagMenu.value = false;
+    nextTick(() => {
+      const renameEl = document.querySelector(`.rename-tag-input[data-tag-id="${tag.id}"]`);
+      if (renameEl) {
+        renameEl.focus();
+        renameEl.select();
+      }
+    });
+  }
+}
+
+function finishRename() {
+  if (renameValue.value.trim()) {
+    emit("updateTag", { id: renamingTagId.value, name: renameValue.value.trim() });
+  }
+  renamingTagId.value = null;
+  renameValue.value = "";
+}
+
+function cancelRename() {
+  renamingTagId.value = null;
+  renameValue.value = "";
+}
+
+function deleteTag() {
+  if (activeTagMenuId.value === 1) return;
+  emit("deleteTag", activeTagMenuId.value);
+  closeTagMenu();
+}
+
+function selectColor(color) {
+  emit("updateTag", { id: activeTagMenuId.value, color });
+}
+
+function getCurrentTagColor() {
+  const tag = props.tags.find((t) => t.id === activeTagMenuId.value);
+  return tag?.color || "";
+}
+
+onMounted(() => {
+  document.addEventListener("click", handleClickOutside);
+});
+
+onUnmounted(() => {
+  document.removeEventListener("click", handleClickOutside);
+});
+
 defineExpose({
   searchQuery,
+  closeTagMenu,
 });
 </script>
 
@@ -95,20 +207,37 @@ defineExpose({
         class="search-input"
         :placeholder="t('search.placeholder')"
         @blur="blurSearch"
+        @keydown.enter="blurSearch"
         @keydown.esc="blurSearch"
       />
     </div>
     <div class="tags-container">
-      <div
-        v-for="tag in tags"
-        :key="tag.id"
-        class="tag"
-        :class="{ active: activeTag === tag.id }"
-        @click="selectTag(tag.id)"
-      >
-        <span v-if="!tag.isDefault" class="tag-dot" :style="{ backgroundColor: tag.color }"></span>
-        <span class="tag-name">{{ tag.name }}</span>
-      </div>
+      <template v-for="tag in sortedTags" :key="tag.id">
+        <div
+          v-if="renamingTagId !== tag.id"
+          class="tag"
+          :class="{ active: activeTag === tag.id }"
+          @click="selectTag(tag.id)"
+          @contextmenu.prevent="handleTagContextMenu($event, tag)"
+        >
+          <span v-if="!tag.isDefault" class="tag-dot" :style="{ backgroundColor: tag.color }"></span>
+          <span class="tag-name">{{ tag.name }}</span>
+        </div>
+        <div
+          v-else
+          class="tag rename-tag-wrapper"
+        >
+          <input
+            class="rename-tag-input"
+            :data-tag-id="tag.id"
+            v-model="renameValue"
+            type="text"
+            @keydown.enter="finishRename"
+            @keydown.esc="cancelRename"
+            @blur="finishRename"
+          />
+        </div>
+      </template>
       <div class="add-tag-input-wrapper" :class="{ active: showAddTag }">
         <input
           ref="newTagInput"
@@ -118,7 +247,7 @@ defineExpose({
           placeholder="Tag..."
           @keydown.enter="finishAddTag"
           @keydown.esc="cancelAddTag"
-          @blur="finishAddTag"
+          @blur="handleAddTagInputBlur"
         />
       </div>
       <button class="add-tag-btn" @click="startAddTag">
@@ -129,6 +258,36 @@ defineExpose({
       </button>
     </div>
   </div>
+
+  <Teleport to="body">
+    <div
+      v-if="showTagMenu"
+      class="tag-context-menu"
+      :style="{ left: tagMenuX + 'px', top: tagMenuY + 'px' }"
+    >
+      <div class="menu-item" @click.stop="startRename">
+        <span>{{ t("tagMenu.rename") }}</span>
+      </div>
+      <div class="menu-divider"></div>
+      <div
+        class="menu-item danger"
+        @click.stop="deleteTag"
+      >
+        <span>{{ t("tagMenu.delete") }}</span>
+      </div>
+      <div class="menu-divider"></div>
+      <div class="color-picker">
+        <div
+          v-for="color in tagColors"
+          :key="color"
+          class="color-dot"
+          :class="{ selected: getCurrentTagColor() === color }"
+          :style="{ backgroundColor: color }"
+          @click.stop="selectColor(color)"
+        ></div>
+      </div>
+    </div>
+  </Teleport>
 </template>
 
 <style scoped>
@@ -263,6 +422,8 @@ defineExpose({
   font-size: 12px;
   color: #1d1d1f;
   font-weight: 500;
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 .add-tag-input-wrapper {
@@ -321,5 +482,114 @@ defineExpose({
   max-width: 90px;
   opacity: 1;
   margin: 0;
+}
+
+.tag-context-menu {
+  position: fixed;
+  background: #ffffff;
+  border-radius: 10px;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.15);
+  min-width: 160px;
+  padding: 6px;
+  z-index: 10000;
+}
+
+.tag-context-menu .menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 32px;
+  padding: 0 14px;
+  cursor: pointer;
+  font-size: 15px;
+  color: #1d1d1f;
+  position: relative;
+  border-radius: 6px;
+}
+
+.tag-context-menu .menu-item:hover {
+  background: #f2f2f2;
+}
+
+.tag-context-menu .menu-item.danger {
+  color: #ff3b30;
+}
+
+.tag-context-menu .menu-item.danger:hover {
+  background: #fff0f0;
+}
+
+.tag-context-menu .menu-divider {
+  height: 1px;
+  background: #e5e5e5;
+  margin: 4px 8px;
+}
+
+.rename-input-wrapper {
+  padding: 4px 8px;
+}
+
+.rename-input {
+  width: 100%;
+  height: 32px;
+  padding: 0 10px;
+  border: 1px solid #007aff;
+  border-radius: 6px;
+  outline: none;
+  font-size: 14px;
+  color: #1d1d1f;
+  background: #ffffff;
+}
+
+.color-picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 6px 8px;
+  justify-content: center;
+}
+
+.color-dot {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  cursor: pointer;
+  transition: transform 0.15s ease;
+  border: 2px solid transparent;
+}
+
+.color-dot:hover {
+  transform: scale(1.15);
+}
+
+.color-dot.selected {
+  border-color: #1d1d1f;
+}
+
+.rename-tag-wrapper {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 10px;
+  height: 32px;
+  background: rgba(0, 0, 0, 0.06);
+  border-radius: 8px;
+  flex-shrink: 0;
+}
+
+.rename-tag-input {
+  width: 70px;
+  padding: 0;
+  height: 32px;
+  border: none;
+  outline: none;
+  font-size: 12px;
+  color: #1d1d1f;
+  background: transparent;
+  font-weight: 500;
+}
+
+.rename-tag-input::placeholder {
+  color: rgba(0, 0, 0, 0.35);
 }
 </style>
