@@ -1,3 +1,15 @@
+/// paste.rs — Tauri 命令处理层
+///
+/// 职责：
+/// - 定义所有 `#[tauri::command]` 函数，供前端通过 invoke 调用
+/// - 剪贴板粘贴/复制操作（含平台相关的粘贴模拟）
+/// - 剪贴板历史的 CRUD 命令
+/// - 设置的读写命令
+/// - 标签的 CRUD 命令
+///
+/// 平台差异：
+/// - macOS: 使用 AppleScript 模拟 Cmd+V 粘贴（需辅助功能权限）
+/// - 其他平台: 使用 enigo 库模拟 Ctrl+V 粘贴
 #[cfg(not(target_os = "macos"))]
 use enigo::{Direction, Enigo, Key, Keyboard, Settings};
 use tauri::{AppHandle, Emitter, Manager};
@@ -5,6 +17,10 @@ use tauri_plugin_clipboard_manager::ClipboardExt;
 
 use crate::clipboard::{ClipboardContent, ClipboardItem};
 
+/// macOS 平台：通过 AppleScript 模拟 Cmd+V 粘贴操作
+///
+/// 需要辅助功能权限（Accessibility Permission），否则会报 -1743 错误
+/// 错误时会自动打开系统偏好设置的辅助功能面板，提示用户授权
 #[cfg(target_os = "macos")]
 fn simulate_paste() -> Result<(), String> {
     use std::process::Command;
@@ -43,6 +59,7 @@ fn simulate_paste() -> Result<(), String> {
     }
 }
 
+/// 非 macOS 平台：通过 enigo 库模拟 Ctrl+V 粘贴操作
 #[cfg(not(target_os = "macos"))]
 fn simulate_paste() -> Result<(), String> {
     let mut enigo = Enigo::new(&Settings::default())
@@ -63,6 +80,11 @@ fn simulate_paste() -> Result<(), String> {
     Ok(())
 }
 
+/// 将 ClipboardItem 的内容写入系统剪贴板
+///
+/// - 文本：直接写入剪贴板
+/// - 图片：从 RGBA 数据重建 Image 对象后写入剪贴板
+///   会校验图片尺寸和数据长度的匹配关系
 fn write_to_clipboard(app: &AppHandle, item: &ClipboardItem) -> Result<(), String> {
     match &item.content {
         ClipboardContent::Text(text) => {
@@ -79,6 +101,7 @@ fn write_to_clipboard(app: &AppHandle, item: &ClipboardItem) -> Result<(), Strin
                 eprintln!("Invalid image dimensions: {}x{}", width, height);
                 return Err(format!("Invalid image dimensions: {}x{}", width, height));
             }
+            // 校验 RGBA 数据长度 = width * height * 4（每像素 4 字节）
             let expected_len = (*width as usize) * (*height as usize) * 4;
             if rgba.len() != expected_len {
                 eprintln!("Image data size mismatch: expected {} bytes, got {}", expected_len, rgba.len());
@@ -92,6 +115,9 @@ fn write_to_clipboard(app: &AppHandle, item: &ClipboardItem) -> Result<(), Strin
     }
 }
 
+/// 隐藏主面板（快速隐藏，不带动画）
+///
+/// 直接将窗口移到屏幕下方并隐藏，用于粘贴操作后快速收起面板
 fn hide_panel(app: &AppHandle) {
     let win = match app.get_webview_window("main") {
         Some(w) => w,
@@ -108,6 +134,7 @@ fn hide_panel(app: &AppHandle) {
 
     state.window_visible.store(false, std::sync::atomic::Ordering::SeqCst);
 
+    // 快速下移窗口位置（非动画），然后隐藏
     if let Ok(pos) = win.outer_position() {
         let _ = win.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(
             pos.x,
@@ -118,10 +145,19 @@ fn hide_panel(app: &AppHandle) {
     let _ = win.hide();
 }
 
+/// 粘贴条目到当前活动应用
+///
+/// 核心粘贴流程：
+/// 1. 若 move_to_top 为 true，先复制记录到顶部再删除原记录
+/// 2. 将内容写入系统剪贴板
+/// 3. 延迟 50ms 后模拟粘贴按键（Cmd+V / Ctrl+V）
+/// 4. 隐藏面板
+/// 5. 返回记录数据（图片类型会剥离 original 以节省带宽）
 #[tauri::command]
 pub async fn paste_item(app: AppHandle, id: i64, move_to_top: Option<bool>) -> Result<Option<crate::clipboard_db::ClipboardRecord>, String> {
     let service = app.state::<std::sync::Arc<crate::clipboard_service::ClipboardService>>();
 
+    // move_to_top: 复制新记录到顶部 + 删除原记录
     let record = if move_to_top.unwrap_or(false) {
         let repo = &service.clipboard_repo;
         let new_record = repo.duplicate_and_move_to_top(id).map_err(|e| e.to_string())?;
@@ -139,8 +175,10 @@ pub async fn paste_item(app: AppHandle, id: i64, move_to_top: Option<bool>) -> R
         timestamp: record.created_at,
     };
 
+    // 将内容写入系统剪贴板
     write_to_clipboard(&app, &item)?;
 
+    // 延迟后模拟粘贴（等待剪贴板写入完成）
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         if let Err(e) = simulate_paste() {
@@ -149,6 +187,7 @@ pub async fn paste_item(app: AppHandle, id: i64, move_to_top: Option<bool>) -> R
     });
     hide_panel(&app);
 
+    // 返回结果时剥离图片原始数据
     if move_to_top.unwrap_or(false) {
         let mut result = record;
         if let crate::clipboard_db::ClipboardContent::Image { width, height, thumbnail, original: _ } = &result.content {
@@ -174,6 +213,7 @@ pub async fn paste_item(app: AppHandle, id: i64, move_to_top: Option<bool>) -> R
     }
 }
 
+/// 复制条目到系统剪贴板（不模拟粘贴，不隐藏面板）
 #[tauri::command]
 pub async fn copy_to_clipboard(app: AppHandle, id: i64) -> Result<(), String> {
     let service = app.state::<std::sync::Arc<crate::clipboard_service::ClipboardService>>();
@@ -191,6 +231,11 @@ pub async fn copy_to_clipboard(app: AppHandle, id: i64) -> Result<(), String> {
     Ok(())
 }
 
+/// 获取剪贴板历史列表
+///
+/// - `page`: 页码（从 0 开始）
+/// - `page_size`: 每页条数
+/// - `tag_id`: 可选标签过滤
 #[tauri::command]
 pub async fn get_clipboard_history(
     app: AppHandle,
@@ -202,6 +247,9 @@ pub async fn get_clipboard_history(
     service.get_history(page, page_size, tag_id)
 }
 
+/// 切换条目置顶状态
+///
+/// 返回切换后的新状态（true = 已置顶）
 #[tauri::command]
 pub async fn toggle_pin(
     app: AppHandle,
@@ -211,6 +259,7 @@ pub async fn toggle_pin(
     service.toggle_pin(id)
 }
 
+/// 删除剪贴板条目
 #[tauri::command]
 pub async fn delete_clipboard_item(
     app: AppHandle,
@@ -220,6 +269,7 @@ pub async fn delete_clipboard_item(
     service.delete_record(id)
 }
 
+/// 应用设置数据结构
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct AppSettings {
     pub save_mode: String,
@@ -232,6 +282,9 @@ pub struct AppSettings {
     pub launch_at_login: bool,
 }
 
+/// 获取应用设置
+///
+/// 从数据库读取所有设置项，缺失项使用默认值
 #[tauri::command]
 pub async fn get_settings(app: AppHandle) -> Result<AppSettings, String> {
     let db = app.state::<std::sync::Arc<crate::database::Database>>();
@@ -256,6 +309,13 @@ pub async fn get_settings(app: AppHandle) -> Result<AppSettings, String> {
     })
 }
 
+/// 保存应用设置
+///
+/// 流程：
+/// 1. 将所有设置项写入数据库
+/// 2. 更新开机自启状态（通过 tauri-plugin-autostart）
+/// 3. 重新注册快捷键（快捷键可能已变更）
+/// 4. 发射 settings-changed 事件通知前端
 #[tauri::command]
 pub async fn save_settings(app: AppHandle, settings: AppSettings) -> Result<(), String> {
     let db = app.state::<std::sync::Arc<crate::database::Database>>();
@@ -268,6 +328,7 @@ pub async fn save_settings(app: AppHandle, settings: AppSettings) -> Result<(), 
     db.set_setting("locale", &settings.locale).map_err(|e| e.to_string())?;
     db.set_setting("launch_at_login", &settings.launch_at_login.to_string()).map_err(|e| e.to_string())?;
 
+    // 更新开机自启状态
     {
         use tauri_plugin_autostart::ManagerExt;
         let autostart_manager = app.autolaunch();
@@ -278,6 +339,7 @@ pub async fn save_settings(app: AppHandle, settings: AppSettings) -> Result<(), 
         }
     }
 
+    // 快捷键变更后需重新注册
     {
         let shortcut_manager = crate::shortcuts::ShortcutManager::new(app.clone());
         if let Err(e) = shortcut_manager.reregister_shortcuts(&settings.shortcut_show, &settings.shortcut_hide) {
@@ -290,6 +352,7 @@ pub async fn save_settings(app: AppHandle, settings: AppSettings) -> Result<(), 
     Ok(())
 }
 
+/// 标签数据传输对象（用于 Tauri 命令返回，简化字段）
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct TagData {
     pub id: i64,
@@ -297,6 +360,7 @@ pub struct TagData {
     pub color: String,
 }
 
+/// 创建标签
 #[tauri::command]
 pub async fn create_tag(app: AppHandle, name: String, color: Option<String>) -> Result<TagData, String> {
     let service = app.state::<std::sync::Arc<crate::clipboard_service::ClipboardService>>();
@@ -308,18 +372,21 @@ pub async fn create_tag(app: AppHandle, name: String, color: Option<String>) -> 
     })
 }
 
+/// 更新标签
 #[tauri::command]
 pub async fn update_tag(app: AppHandle, id: i64, name: String, color: String) -> Result<(), String> {
     let service = app.state::<std::sync::Arc<crate::clipboard_service::ClipboardService>>();
     service.update_tag(id, name, color)
 }
 
+/// 删除标签
 #[tauri::command]
 pub async fn delete_tag(app: AppHandle, id: i64) -> Result<(), String> {
     let service = app.state::<std::sync::Arc<crate::clipboard_service::ClipboardService>>();
     service.delete_tag(id)
 }
 
+/// 获取所有标签
 #[tauri::command]
 pub async fn get_all_tags(app: AppHandle) -> Result<Vec<TagData>, String> {
     let service = app.state::<std::sync::Arc<crate::clipboard_service::ClipboardService>>();
@@ -331,6 +398,7 @@ pub async fn get_all_tags(app: AppHandle) -> Result<Vec<TagData>, String> {
     }).collect())
 }
 
+/// 更新记录的标签关联
 #[tauri::command]
 pub async fn update_record_tags(app: AppHandle, id: i64, tag_ids: Vec<i64>) -> Result<(), String> {
     let service = app.state::<std::sync::Arc<crate::clipboard_service::ClipboardService>>();
